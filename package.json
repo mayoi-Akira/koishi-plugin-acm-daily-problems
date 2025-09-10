@@ -1,13 +1,20 @@
 {
   "name": "koishi-plugin-acm-daily-problems",
   "description": "每日推送算法题",
-  "version": "0.0.1",
+  "version": "0.0.2",
+  "contributors": [
+    "mayoi_Akira <akane36@163.com>",
+    "hanser_no_neko <rikowodo1989@gmail.com>"
+  ],
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
     "lib",
     "dist"
   ],
+  "koishi": {
+    "preview": true
+  },
   "license": "MIT",
   "keywords": [
     "chatbot",
