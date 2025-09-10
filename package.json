@@ -6,7 +6,12 @@
     "mayoi_Akira <akane36@163.com>",
     "hanser_no_neko <rikowodo1989@gmail.com>"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git + https://github.com/mayoi-Akira/koishi-plugin-acm-daily-problems.git"
+  },
   "main": "lib/index.js",
+  "homepage": "https://github.com/mayoi-Akira/koishi-plugin-acm-daily-problems",
   "typings": "lib/index.d.ts",
   "files": [
     "lib",

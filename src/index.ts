@@ -7,7 +7,16 @@ export const inject = {
   required: ['database', 'cron', 'puppeteer'],
   optional: [],
 };
+export const usage = `
+    每天早上8:30推送一组cf随机题目（简单、中等、困难各一道）
 
+    指令:
+    - \`rp / randproblem\` - 随机获取简单(≤1200)、中等(≤2000)、困难(>2000)题目各一道
+
+    - \`ep / emplace <题目编号或链接>\` - 手动添加题目到推送队列
+
+    - \`push 1 / 0\` - 开启/关闭本群每日题目推送
+`;
 declare module 'koishi' {
   interface Tables {
     acm_problems: problems;
@@ -188,7 +197,7 @@ export function apply(ctx: Context) {
         await ctx.database.create('acm_pushGroup', { groupId: groupId, push: push === 1 });
       }
 
-      session.send(push ? '已开启每日题目推送' : '已关闭每日题目推送');
+      session.send(push ? '每日题目推送已开启，每天8:30准时推送' : '已关闭每日题目推送');
     });
 
   ctx
