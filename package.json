@@ -1,7 +1,7 @@
 {
   "name": "koishi-plugin-acm-daily-problems",
   "description": "每日推送算法题",
-  "version": "0.1.0",
+  "version": "0.1.3",
   "contributors": [
     "mayoi_Akira <akane36@163.com>",
     "hanser_no_neko <rikowodo1989@gmail.com>"

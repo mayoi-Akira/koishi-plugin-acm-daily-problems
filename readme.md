@@ -3,6 +3,8 @@
 [![npm](https://img.shields.io/npm/v/koishi-plugin-acm-daily-problems?style=flat-square)](https://www.npmjs.com/package/koishi-plugin-acm-daily-problems)
 
 每天早上 8:30 推送一组 cf 随机题目（简单、中等、困难各一道）
+每道题获得积分 = 题目难度 / 100
+首杀额外 +5 分
 
 指令:
 

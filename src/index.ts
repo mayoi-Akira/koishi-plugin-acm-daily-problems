@@ -9,20 +9,25 @@ export const inject = {
 };
 export const usage = `
 ### 基础功能
+
 每天早上8:30推送一组cf随机题目（简单、中等、困难各一道）
 
+每道题获得积分 = 题目难度 / 100
+
+前五名会有额外加分，第一名+5分，第二名+4分，依次类推
+
 ### 指令:
-- \`rp \` - (Rand Problems)随机获取简单(≤1200)、中等(≤2000)、困难(>2000)题目各一道
+- \`/rp \` - (Rand Problems)随机获取简单、中等、困难题目各一道
 
-- \`ep <题目编号或链接>\` - (Emplace Problems)手动添加题目到推送队列
+- \`/ep <题目编号或链接>\` - (Emplace Problems)手动添加题目到推送队列
 
-- \`push 1 / 0\` - 开启/关闭每日题目推送
+- \`/push 1 / 0\` - 开启/关闭每日题目推送
 
-- \`tp\` - (Today Problems)获取今天的每日一题
+- \`/tp\` - (Today Problems)获取今天的每日一题
 
-- \`cb\` - (Check Board)查看当前的积分排行榜
+- \`/cb\` - (Check Board)查看当前的积分排行榜
 
-- \`绑定cf / 解绑cf\` - 将 cf 账号绑定/解绑当前 qq 账号，解绑后积分数据全部清除！
+- \`/绑定cf \`/ \`/解绑cf\` - 将 cf 账号绑定/解绑当前 qq 账号，解绑后积分数据全部清除！
 
 `;
 declare module 'koishi' {
@@ -36,6 +41,7 @@ declare module 'koishi' {
     acm_users: users;
   }
 }
+
 export interface problems {
   id: number;
   contestId: number;
@@ -46,6 +52,7 @@ export interface problems {
   used: boolean;
   pushDate?: string;
   solved: string[];
+  user?: string;
 }
 export interface pushGroup {
   id: number;
@@ -58,11 +65,37 @@ export interface users {
   cfHandle: string;
   score: number;
 }
-export interface Config {}
+export interface Config {
+  difficulty1: number;
+  difficulty2: number;
+  pushTime: string;
+}
 
-export const Config: Schema<Config> = Schema.object({});
-
-async function getProblemList() {
+export const Config: Schema<Config> = Schema.object({
+  difficulty1: Schema.number()
+    .default(1200)
+    .min(800)
+    .max(2400)
+    .description('简单题目难度上限，范围 800 ~ 2400'),
+  difficulty2: Schema.number()
+    .default(2000)
+    .max(2500)
+    .description(
+      '中等题目难度上限，最高2500。若低于简单题目难度上限则自动修正为简单题目难度上限 + 100'
+    ),
+  pushTime: Schema.string()
+    .default('8:30')
+    .description('每日题目推送时间，24小时制，格式 hh:mm')
+    .pattern(/^([01]?\d|2[0-3]):[0-5]\d$/),
+});
+//将cfg时间转换为cron格式
+function getPushTime(cfg: Config): string {
+  const [hour, minute] = cfg.pushTime!.split(':');
+  const res = `${minute} ${hour} * * *`;
+  return res;
+}
+//获取题目列表的函数
+async function getProblemList(cfg: Config) {
   const url = 'https://codeforces.com/api/problemset.problems';
   const res = await fetch(url);
   const data = await res.json();
@@ -77,9 +110,9 @@ async function getProblemList() {
     const problems = data.result.problems;
     for (const problem of problems) {
       if (!problem.rating) continue;
-      if (problem.rating <= 1200) {
+      if (problem.rating <= cfg.difficulty1) {
         randomEasyProblems.push(problem);
-      } else if (problem.rating <= 2000) {
+      } else if (problem.rating <= cfg.difficulty2) {
         randomMidProblems.push(problem);
       } else {
         randomHardProblems.push(problem);
@@ -88,421 +121,19 @@ async function getProblemList() {
   }
   return { randomEasyProblems, randomMidProblems, randomHardProblems };
 }
-
-function getTodayDate() {
-  const today = new Date();
-  const year = today.getFullYear();
-  const month = String(today.getMonth() + 1).padStart(2, '0');
-  const day = String(today.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
-}
-
-//从数据库获取或随机选择指定难度的问题
-async function getProblemByDifficulty(
-  ctx: Context,
-  difficulty: number,
-  problemPool: any[]
-): Promise<any> {
-  //从数据库中获取未使用的题目
-  const unusedProblems = await ctx.database.get('acm_problems', {
-    used: false,
-    difficulty: difficulty,
-  });
-  const pushDate = getTodayDate();
-  if (unusedProblems.length > 0) {
-    //如果有未使用的题目，选择第一个并标记为已使用
-    const selectedProblem = unusedProblems[0];
-    await ctx.database.set(
-      'acm_problems',
-      { contestId: selectedProblem.contestId, index: selectedProblem.index },
-      { used: true, pushDate: pushDate }
-    );
-    return selectedProblem;
-  } else {
-    //从题目池中随机选择一个新题目
-    let selectedProblem = problemPool[Math.floor(Math.random() * problemPool.length)];
-
-    //将新题目存入数据库并标记为已使用
-    await ctx.database.create('acm_problems', {
-      contestId: selectedProblem.contestId,
-      index: selectedProblem.index,
-      rating: selectedProblem.rating,
-      name: selectedProblem.name,
-      difficulty: difficulty,
-      used: true,
-      pushDate: pushDate,
-    });
-
-    return selectedProblem;
-  }
-}
-
-//生成题目链接
-function generateProblemLink(problem: any): string {
-  return `https://codeforces.com/problemset/problem/${problem.contestId}/${problem.index}`;
-}
-
-//格式化题目消息
-function formatProblemsMessage(
-  easyProblem: any,
-  midProblem: any,
-  hardProblem: any,
-  title: string = '今日题目如下'
-): string {
-  return `${title}：\n\n简单：\n${easyProblem.name}\n${generateProblemLink(easyProblem)}（${
-    easyProblem.rating
-  }）\n\n中等：\n${midProblem.name}\n${generateProblemLink(midProblem)}（${
-    midProblem.rating
-  }）\n\n困难：\n${hardProblem.name}\n${generateProblemLink(hardProblem)}（${hardProblem.rating}）`;
-}
-
-async function updateScore(ctx: Context) {
-  const today = getTodayDate();
-  const problems = await ctx.database.get('acm_problems', { used: true, pushDate: today });
-  if (!problems || problems.length === 0) {
-    return 0;
-  }
-
-  const userScoreIncrements = new Map<string, number>();
-
-  //从 1 开始计分
-  //数据库中的user
-  const users = await ctx.database.get('acm_users', {});
-  const userSet = new Set(users.map((u: any) => u.cfHandle));
-
-  for (const problem of problems) {
-    let scoreForThisProblem = problem.rating / 100;
-    const { contestId, index } = problem;
-    const url = `https://codeforces.com/api/contest.status?contestId=${contestId}&from=1&count=1000`;
-    try {
-      const res = await fetch(url);
-      const data = await res.json();
-      if (data.status !== 'OK') {
-        console.error(`cf api error:${contestId}-${index}:`, data);
-        continue; //跳过此题，继续处理其他题
-      }
-
-      const submissions = data.result || [];
-      // console.log(submissions);
-      //读取数据库中该题已有的 solved 列表
-      const t = await ctx.database.get('acm_problems', { contestId: contestId, index: index });
-      const existingSolvedArr: string[] = Array.isArray(t?.[0]?.solved) ? t[0].solved : [];
-      const existingSolved = new Set(existingSolvedArr);
-
-      //收集新 AC 的人
-      const acceptedUsers = new Set<string>();
-      // console.log('users:', userSet);
-      for (const submission of submissions) {
-        // console.log(submission);
-        if (submission?.verdict !== 'OK' || submission.problem.index !== index) continue;
-        const handle = submission.author?.members?.[0]?.handle;
-        // console.log(`${contestId}-${index} AC by ${handle}`);
-        if (!handle || !userSet.has(handle)) continue;
-        if (!existingSolved.has(handle)) acceptedUsers.add(handle);
-      }
-
-      const acUsers = Array.from(acceptedUsers).reverse();
-      if (acUsers.length === 0) {
-        //没有新 AC，继续下一个题
-        continue;
-      }
-
-      //更新题目已解决列表（把旧的和新的拼起来）
-      const newSolvedArr = [...existingSolvedArr, ...acUsers];
-      await ctx.database.set('acm_problems', { contestId, index }, { solved: newSolvedArr });
-
-      //累积每个新 AC 用户应加的分数
-      //如果该用户是首杀，额外加一分
-      if (existingSolved.size === 0) {
-        const prevFirstAcScore = userScoreIncrements.get(acUsers[0]) ?? 0;
-        userScoreIncrements.set(acUsers[0], prevFirstAcScore + 5);
-      }
-      for (const acUser of acUsers) {
-        const prev = userScoreIncrements.get(acUser) ?? 0;
-        userScoreIncrements.set(acUser, prev + scoreForThisProblem);
-      }
-    } catch (err) {
-      console.error(`${contestId}-${index}:`, err);
-      //遇错跳过当前题，继续处理下面的题
-      continue;
-    }
-  }
-
-  //将累积的分数统一写入用户表（并行写入以加速）
-  const batch = [];
-  for (const [cfHandle, inc] of userScoreIncrements.entries()) {
-    if (!inc) continue;
-    batch.push(
-      ctx.database.set('acm_users', { cfHandle }, (row: any) => ({
-        score: $.add(row.score, inc),
-      }))
-    );
-  }
-  try {
-    await Promise.all(batch);
-  } catch (err) {
-    console.error('updating score error:', err);
-    return 1;
-  }
-
-  return 0; //成功
-}
-
-export function apply(ctx: Context) {
-  //数据库
-  ctx.model.extend(
-    'acm_problems',
-    {
-      id: 'unsigned',
-      contestId: 'integer',
-      index: 'string',
-      rating: 'integer',
-      name: 'string',
-      difficulty: 'integer',
-      used: 'boolean',
-      //时间戳
-      pushDate: 'string',
-      solved: 'list',
-    },
-    {
-      autoInc: true,
-    }
-  );
-  ctx.model.extend(
-    'acm_pushGroup',
-    {
-      id: 'unsigned',
-      groupId: 'string',
-      push: 'boolean',
-    },
-    {
-      autoInc: true,
-    }
-  );
-  ctx.model.extend(
-    'acm_users',
-    {
-      id: 'unsigned',
-      qId: 'string',
-      cfHandle: 'string',
-      score: 'integer',
-    },
-    {
-      autoInc: true,
-    }
-  );
-
-  //ctx.()
-
-  ctx
-    .command('rp', '(RandProblem)随机一组cf题目')
-    .usage('\n随机获取简单(≤1200)、中等(≤2000)、困难(>2000)题目各一道')
-    .action(async ({ session }) => {
-      const { randomEasyProblems, randomMidProblems, randomHardProblems } = await getProblemList();
-
-      //从每个列表中随机选一个题目
-      const easyProblem = randomEasyProblems[Math.floor(Math.random() * randomEasyProblems.length)];
-      const midProblem = randomMidProblems[Math.floor(Math.random() * randomMidProblems.length)];
-      const hardProblem = randomHardProblems[Math.floor(Math.random() * randomHardProblems.length)];
-
-      if (!easyProblem || !midProblem || !hardProblem) {
-        session.send('题目获取失败');
-        return;
-      }
-
-      const message = formatProblemsMessage(easyProblem, midProblem, hardProblem, '随机题目如下');
-      session.send(message);
-    });
-
-  ctx
-    .command('push <push:number>', '开启/关闭每日题目推送')
-    .usage('push 1 开启推送，push 0 关闭推送')
-    .action(async ({ session }, push) => {
-      if (push !== 0 && push !== 1) {
-        session.send('push 1 开启题目推送\npush 0 关闭题目推送');
-        return;
-      }
-      const groupId = session.channelId;
-
-      const existing = await ctx.database.get('acm_pushGroup', { groupId: groupId });
-      if (existing.length > 0) {
-        //更新已有记录
-        await ctx.database.set('acm_pushGroup', { groupId: groupId }, { push: push === 1 });
-      } else {
-        //创建新记录
-        await ctx.database.create('acm_pushGroup', { groupId: groupId, push: push === 1 });
-      }
-
-      session.send(push ? '每日题目推送已开启，每天8:30准时推送' : '已关闭每日题目推送');
-    });
-
-  ctx
-    .command('ep <problem:string>', '(EmplaceProblem)手动添加题目到题库')
-    .usage('\n使用示例：\nemplace 1234/A 或\nemplace 1234A 或\nemplace [题目链接]')
-    .action(async ({ session }, str) => {
-      let contestId: number;
-      let index: string;
-
-      //解析输入
-      const urlMatch = str.match(
-        /codeforces\.com\/(?:contest|problemset)\/(?:problem\/)?(\d+)\/(?:problem\/)?([A-Za-z]+)/
-      );
-      if (urlMatch) {
-        contestId = parseInt(urlMatch[1]);
-        index = urlMatch[2];
-      } else {
-        const parts = str.split(/\/| /);
-        if (parts.length === 2) {
-          contestId = parseInt(parts[0]);
-          index = parts[1];
-        } else if (parts.length === 1) {
-          const match = parts[0].match(/^(\d+)([A-Za-z]+)$/);
-          if (match) {
-            contestId = parseInt(match[1]);
-            index = match[2];
-          } else {
-            session.send('输入格式错误，请使用 "1234/A"、 "1234A" 或 题目链接');
-            return;
-          }
-        } else {
-          session.send('输入格式错误，请使用 "1234/A"、 "1234A" 或 题目链接');
-          return;
-        }
-      }
-      index = index.toUpperCase();
-      //检查题目是否已存在
-      const existing = await ctx.database.get('acm_problems', {
-        contestId: contestId,
-        index: index,
-      });
-      if (existing.length > 0) {
-        ctx.database.set('acm_problems', { contestId: contestId, index: index }, { used: false });
-        if (existing[0].used === true) session.send(`成功添加题目：${existing[0].name}`);
-        if (existing[0].used === false) session.send(`推送队列中已存在该题目`);
-        return;
-      }
-
-      //获取题目信息
-      const apiUrl = `https://codeforces.com/api/problemset.problems`;
-      const res = await fetch(apiUrl);
-      const data = await res.json();
-      if (data.status !== 'OK') {
-        session.send('无法从 Codeforces 获取题目信息');
-        return;
-      }
-
-      const problem = data.result.problems.find(
-        (p: any) => p.contestId === contestId && p.index === index
-      );
-      if (!problem) {
-        session.send('未找到该题目，请检查题目编号是否正确');
-        return;
-      }
-      if (!problem.rating) {
-        session.send('该题目无难度评级，无法添加到题库');
-        return;
-      }
-
-      //确定难度等级
-      let difficulty: number;
-      if (problem.rating <= 1200) {
-        difficulty = 1; //简单
-      } else if (problem.rating <= 2000) {
-        difficulty = 2; //中等
-      } else {
-        difficulty = 3; //困难
-      }
-
-      //添加题目到数据库
-      await ctx.database.create('acm_problems', {
-        contestId: contestId,
-        index: index,
-        rating: problem.rating,
-        name: problem.name,
-        difficulty: difficulty,
-        used: false,
-      });
-
-      session.send(`成功添加题目：${problem.name}`);
-    });
-
-  //绑定codeforces账号
-  ctx
-    .command('绑定cf <handle:string>', '绑定codeforces账号')
-    .action(async ({ session }, handle) => {
-      //console.log(handle);
-      const url = `https://codeforces.com/api/user.info?handles=${handle}`;
-      const res = await fetch(url);
-      const data = await res.json();
-      if (data.status !== 'OK') {
-        session.send('未找到该Codeforces账号，请检查用户名是否正确');
-        return;
-      }
-      const userId = session.userId;
-      const qexisting = await ctx.database.get('acm_users', { qId: userId });
-      const cexisting = await ctx.database.get('acm_users', { cfHandle: handle });
-      if (cexisting.length > 0) {
-        session.send(`该Codeforces账号已被绑定`);
-        return;
-      }
-      if (qexisting.length > 0) {
-        //更新已有记录
-        await ctx.database.set('acm_users', { qId: userId }, { cfHandle: handle });
-        session.send(`已成功更新Codeforces账号：${handle}`);
-      } else {
-        //创建新记录
-        await ctx.database.create('acm_users', { qId: userId, cfHandle: handle, score: 0 });
-        session.send(`已成功绑定Codeforces账号：${handle}`);
-      }
-    });
-
-  //解绑cf账号
-  ctx
-    .command('解绑cf', '解绑codeforces账号')
-    .usage('解绑后积分数据全部清除，请慎重')
-    .action(async ({ session }) => {
-      const userId = session.userId;
-      const existing = await ctx.database.get('acm_users', { qId: userId });
-      if (existing.length === 0) {
-        session.send('你还未绑定Codeforces账号呢');
-        return;
-      }
-      await ctx.database.remove('acm_users', { qId: userId });
-      session.send('已成功解绑Codeforces账号');
-    });
-  //获取今天的题
-  ctx.command('tp', '(TodayProblems)获取今天的题目').action(async ({ session }) => {
-    const today = getTodayDate();
-    const todayProblems = await ctx.database.get('acm_problems', {
-      used: true,
-      pushDate: today,
-    });
-    if (!todayProblems || todayProblems.length === 0) {
-      session.send('今天没有题目哦');
-      return;
-    }
-    let easyProblem, midProblem, hardProblem;
-    for (const problem of todayProblems) {
-      if (problem.difficulty === 1) {
-        easyProblem = problem;
-      } else if (problem.difficulty === 2) {
-        midProblem = problem;
-      } else if (problem.difficulty === 3) {
-        hardProblem = problem;
-      }
-    }
-    const message = formatProblemsMessage(easyProblem, midProblem, hardProblem, '今天的题目如下');
-    session.send(message);
-  });
-  //渲染积分榜图片的函数
-  async function renderLeaderboardImage(
-    users: any[],
-    easyProblemSolved: string[],
-    midProblemSolved: string[],
-    hardProblemSolved: string[],
-    startRank: number = 1
-  ): Promise<Buffer> {
-    const html = `
+//渲染积分榜图片的函数
+async function renderLeaderboardImage(
+  users: any[],
+  easyProblemSolved: string[],
+  midProblemSolved: string[],
+  hardProblemSolved: string[],
+  easyPusher: string,
+  midPusher: string,
+  hardPusher: string,
+  startRank: number = 1,
+  ctx: Context
+): Promise<Buffer> {
+  const html = `
 <!DOCTYPE html>
 <html>
 <head>
@@ -613,6 +244,14 @@ export function apply(ctx: Context) {
             border-color: #285028;
             color: white;
         }
+        .problem-circle.pusher {
+            width: 50px;
+            background: #ffa500;
+            border-color: #ff8c00;
+            color: white;
+            font-size: 12px;
+            font-weight: bold;
+        }
     </style>
 </head>
 <body>
@@ -633,35 +272,40 @@ export function apply(ctx: Context) {
             const hardFirstBlood =
               hardProblemSolved.length > 0 && hardProblemSolved[0] === user.cfHandle;
 
+            // 检查用户是否为推题人
+            const isEasyPusher = easyPusher === user.cfHandle;
+            const isMidPusher = midPusher === user.cfHandle;
+            const isHardPusher = hardPusher === user.cfHandle;
+
             return `
               <div class="rank-item">
-              <div class="rank-number" style="font-size: ${
-                startRank + index === 1 || startRank + index === 2 || startRank + index === 3
-                  ? '22px'
-                  : '14px'
-              }">${
-              startRank + index === 1
-                ? '🥇'
-                : startRank + index === 2
-                ? '🥈'
-                : startRank + index === 3
-                ? '🥉'
-                : startRank + index
-            }</div>
+              <div class="rank-number" style="font-size: '14px'">${startRank + index}</div>
               <div class="user-info">
                 <div class="username">${user.cfHandle}</div>
                 <div class="score">${user.score} 分</div>
               </div>
               <div class="problem-status">
                 <div class="problem-circle ${
-                  easyFirstBlood ? 'first-blood' : easyStatus ? 'solved' : ''
-                }">A</div>
+                  isEasyPusher
+                    ? 'pusher'
+                    : easyFirstBlood
+                    ? 'first-blood'
+                    : easyStatus
+                    ? 'solved'
+                    : ''
+                }">${isEasyPusher ? '推题人' : 'A'}</div>
                 <div class="problem-circle ${
-                  midFirstBlood ? 'first-blood' : midStatus ? 'solved' : ''
-                }">B</div>
+                  isMidPusher ? 'pusher' : midFirstBlood ? 'first-blood' : midStatus ? 'solved' : ''
+                }">${isMidPusher ? '推题人' : 'B'}</div>
                 <div class="problem-circle ${
-                  hardFirstBlood ? 'first-blood' : hardStatus ? 'solved' : ''
-                }">C</div>
+                  isHardPusher
+                    ? 'pusher'
+                    : hardFirstBlood
+                    ? 'first-blood'
+                    : hardStatus
+                    ? 'solved'
+                    : ''
+                }">${isHardPusher ? '推题人' : 'C'}</div>
               </div>
               </div>
             `;
@@ -671,19 +315,463 @@ export function apply(ctx: Context) {
 </body>
 </html>`;
 
-    const page = await ctx.puppeteer.page();
+  const page = await ctx.puppeteer.page();
+  try {
+    await page.setContent(html);
+    await page.setViewport({ width: 550, height: 600 });
+    const screenshot = await page.screenshot({
+      type: 'png',
+      fullPage: true,
+    });
+    return screenshot as Buffer;
+  } finally {
+    await page.close();
+  }
+}
+
+function getDate(timestamp?: number): string {
+  const today = timestamp ? new Date(timestamp * 1000) : new Date();
+  const year = today.getFullYear();
+  const month = String(today.getMonth() + 1).padStart(2, '0');
+  const day = String(today.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+//从数据库获取或随机选择指定难度的问题
+async function getProblemByDifficulty(
+  ctx: Context,
+  difficulty: number,
+  problemPool: any[]
+): Promise<any> {
+  //从数据库中获取未使用的题目
+  const unusedProblems = await ctx.database.get('acm_problems', {
+    used: false,
+    difficulty: difficulty,
+  });
+  const pushDate = getDate();
+  if (unusedProblems.length > 0) {
+    //如果有未使用的题目，选择第一个并标记为已使用
+    const selectedProblem = unusedProblems[0];
+    await ctx.database.set(
+      'acm_problems',
+      { contestId: selectedProblem.contestId, index: selectedProblem.index },
+      { used: true, pushDate: pushDate }
+    );
+    return selectedProblem;
+  } else {
+    //从题目池中随机选择一个新题目
+    let selectedProblem = problemPool[Math.floor(Math.random() * problemPool.length)];
+
+    //将新题目存入数据库并标记为已使用
+    await ctx.database.create('acm_problems', {
+      contestId: selectedProblem.contestId,
+      index: selectedProblem.index,
+      rating: selectedProblem.rating,
+      name: selectedProblem.name,
+      difficulty: difficulty,
+      used: true,
+      pushDate: pushDate,
+    });
+
+    return selectedProblem;
+  }
+}
+
+//生成题目链接
+function generateProblemLink(problem: any): string {
+  return `https://codeforces.com/problemset/problem/${problem.contestId}/${problem.index}`;
+}
+
+//格式化题目消息
+function formatProblemsMessage(
+  easyProblem: any,
+  midProblem: any,
+  hardProblem: any,
+  title: string = '今日题目如下'
+): string {
+  return `${title}：\n\n简单：\n${easyProblem.name}\n${generateProblemLink(easyProblem)}（${
+    easyProblem.rating
+  }）\n\n中等：\n${midProblem.name}\n${generateProblemLink(midProblem)}（${
+    midProblem.rating
+  }）\n\n困难：\n${hardProblem.name}\n${generateProblemLink(hardProblem)}（${hardProblem.rating}）`;
+}
+
+async function updateScore(ctx: Context) {
+  const today = getDate();
+  const problems = await ctx.database.get('acm_problems', { used: true, pushDate: today });
+  if (!problems || problems.length === 0) {
+    return 0;
+  }
+
+  const userScoreIncrements = new Map<string, number>();
+
+  //从 1 开始计分
+  //数据库中的user
+  const users = await ctx.database.get('acm_users', {});
+  const userSet = new Set(users.map((u: any) => u.cfHandle));
+
+  for (const problem of problems) {
+    let scoreForThisProblem = problem.rating / 100;
+    const { contestId, index, pushDate } = problem;
+    const url = `https://codeforces.com/api/contest.status?contestId=${contestId}&from=1&count=1000`;
     try {
-      await page.setContent(html);
-      await page.setViewport({ width: 550, height: 600 });
-      const screenshot = await page.screenshot({
-        type: 'png',
-        fullPage: true,
-      });
-      return screenshot as Buffer;
-    } finally {
-      await page.close();
+      const res = await fetch(url);
+      const data = await res.json();
+      if (data.status !== 'OK') {
+        console.error(`cf api error:${contestId}-${index}:`, data);
+        continue; //跳过此题，继续处理其他题
+      }
+
+      const submissions = data.result || [];
+      // console.log(submissions);
+      //读取数据库中该题已有的 solved 列表
+      const t = await ctx.database.get('acm_problems', { contestId: contestId, index: index });
+      const existingSolvedArr: string[] = Array.isArray(t?.[0]?.solved) ? t[0].solved : [];
+      const existingSolved = new Set(existingSolvedArr);
+
+      //收集新 AC 的人
+      const acceptedUsers = new Set<string>();
+      // console.log('users:', userSet);
+      for (const submission of submissions) {
+        // console.log(submission);
+        if (submission?.verdict !== 'OK' || submission.problem.index !== index) continue;
+        const date = getDate(submission.creationTimeSeconds);
+        //只统计推送当天的 AC
+        if (date !== pushDate) continue;
+
+        //取第一个作者作为提交者
+        const handle = submission.author?.members?.[0]?.handle;
+        //过滤掉推题人
+        if (handle === problem.user) continue;
+        // console.log(`${contestId}-${index} AC by ${handle}`);
+        if (!handle || !userSet.has(handle)) continue;
+        if (!existingSolved.has(handle)) acceptedUsers.add(handle);
+      }
+
+      const acUsers = Array.from(acceptedUsers).reverse();
+      if (acUsers.length === 0) {
+        //没有新 AC，继续下一个题
+        continue;
+      }
+
+      //更新题目已解决列表（把旧的和新的拼起来）
+      const newSolvedArr = [...existingSolvedArr, ...acUsers];
+      await ctx.database.set('acm_problems', { contestId, index }, { solved: newSolvedArr });
+
+      //累积每个新 AC 用户应加的分数
+      //前五个做出，额外加分
+      let extraScore = Math.max(5 - existingSolved.size, 0);
+
+      // if (existingSolved.size === 0) {
+      //   const prevFirstAcScore = userScoreIncrements.get(acUsers[0]) ?? 0;
+      //   userScoreIncrements.set(acUsers[0], prevFirstAcScore + 5);
+      // }
+      for (const acUser of acUsers) {
+        const prev = userScoreIncrements.get(acUser) ?? 0;
+        userScoreIncrements.set(acUser, prev + scoreForThisProblem + extraScore);
+        if (extraScore > 0) extraScore--;
+      }
+    } catch (err) {
+      console.error(`${contestId}-${index}:`, err);
+      //遇错跳过当前题，继续处理下面的题
+      continue;
     }
   }
+
+  //将累积的分数统一写入用户表（并行写入以加速）
+  const batch = [];
+  for (const [cfHandle, inc] of userScoreIncrements.entries()) {
+    if (!inc) continue;
+    batch.push(
+      ctx.database.set('acm_users', { cfHandle }, (row: any) => ({
+        score: $.add(row.score, inc),
+      }))
+    );
+  }
+  try {
+    await Promise.all(batch);
+  } catch (err) {
+    console.error('updating score error:', err);
+    return 1;
+  }
+
+  return 0; //成功
+}
+
+export function apply(ctx: Context, cfg: Config) {
+  if (cfg.difficulty2 < cfg.difficulty1) {
+    cfg.difficulty2 = cfg.difficulty1 + 100;
+  }
+
+  //数据库
+  ctx.model.extend(
+    'acm_problems',
+    {
+      id: 'unsigned',
+      contestId: 'integer',
+      index: 'string',
+      rating: 'integer',
+      name: 'string',
+      difficulty: 'integer',
+      used: 'boolean',
+      pushDate: 'string',
+      solved: 'list',
+      user: 'string',
+    },
+    {
+      autoInc: true,
+    }
+  );
+  ctx.model.extend(
+    'acm_pushGroup',
+    {
+      id: 'unsigned',
+      groupId: 'string',
+      push: 'boolean',
+    },
+    {
+      autoInc: true,
+    }
+  );
+  ctx.model.extend(
+    'acm_users',
+    {
+      id: 'unsigned',
+      qId: 'string',
+      cfHandle: 'string',
+      score: 'integer',
+    },
+    {
+      autoInc: true,
+    }
+  );
+
+  //ctx.()
+
+  ctx
+    .command('rp', '(RandProblem)随机一组cf题目')
+    .usage('\n随机获取简单、中等、困难题目各一道')
+    .action(async ({ session }) => {
+      const { randomEasyProblems, randomMidProblems, randomHardProblems } = await getProblemList(
+        cfg
+      );
+
+      //从每个列表中随机选一个题目
+      const easyProblem = randomEasyProblems[Math.floor(Math.random() * randomEasyProblems.length)];
+      const midProblem = randomMidProblems[Math.floor(Math.random() * randomMidProblems.length)];
+      const hardProblem = randomHardProblems[Math.floor(Math.random() * randomHardProblems.length)];
+
+      if (!easyProblem || !midProblem || !hardProblem) {
+        session.send('题目获取失败');
+        return;
+      }
+
+      const message = formatProblemsMessage(easyProblem, midProblem, hardProblem, '随机题目如下');
+      session.send(message);
+    });
+
+  ctx
+    .command('push <push:number>', '开启/关闭每日题目推送')
+    .usage('push 1 开启推送，push 0 关闭推送')
+    .action(async ({ session }, push) => {
+      if (push !== 0 && push !== 1) {
+        session.send('push 1 开启题目推送\npush 0 关闭题目推送');
+        return;
+      }
+      const groupId = session.channelId;
+
+      const existing = await ctx.database.get('acm_pushGroup', { groupId: groupId });
+      if (existing.length > 0) {
+        //更新已有记录
+        await ctx.database.set('acm_pushGroup', { groupId: groupId }, { push: push === 1 });
+      } else {
+        //创建新记录
+        await ctx.database.create('acm_pushGroup', { groupId: groupId, push: push === 1 });
+      }
+
+      session.send(push ? '每日题目推送已开启，每天8:30准时推送' : '已关闭每日题目推送');
+    });
+
+  ctx
+    .command('ep <problem:string>', '(EmplaceProblem)手动添加题目到题库')
+    .usage('\n使用示例：\nemplace 1234/A 或\nemplace 1234A 或\nemplace [题目链接]')
+    .action(async ({ session }, str) => {
+      let contestId: number;
+      let index: string;
+
+      //解析输入
+      const urlMatch = str.match(
+        /codeforces\.com\/(?:contest|problemset)\/(?:problem\/)?(\d+)\/(?:problem\/)?([A-Za-z]+)/
+      );
+      if (urlMatch) {
+        contestId = parseInt(urlMatch[1]);
+        index = urlMatch[2];
+      } else {
+        const parts = str.split(/\/| /);
+        if (parts.length === 2) {
+          contestId = parseInt(parts[0]);
+          index = parts[1];
+        } else if (parts.length === 1) {
+          const match = parts[0].match(/^(\d+)([A-Za-z]+)$/);
+          if (match) {
+            contestId = parseInt(match[1]);
+            index = match[2];
+          } else {
+            session.send('输入格式错误，请使用 "1234/A"、 "1234A" 或 题目链接');
+            return;
+          }
+        } else {
+          session.send('输入格式错误，请使用 "1234/A"、 "1234A" 或 题目链接');
+          return;
+        }
+      }
+      index = index.toUpperCase();
+      //获取推送人的handle
+      const userId = session.userId;
+      const user = await ctx.database.get('acm_users', { qId: userId });
+      if (user.length === 0) {
+        session.send('请先绑定Codeforces账号后再添加题目');
+        return;
+      }
+      //检查题目是否已存在
+      const existing = await ctx.database.get('acm_problems', {
+        contestId: contestId,
+        index: index,
+      });
+      if (existing.length > 0) {
+        if (existing[0].used === false) {
+          session.send(`推送队列中已存在该题目`);
+          return;
+        }
+        ctx.database.set(
+          'acm_problems',
+          { contestId: contestId, index: index },
+          { used: false, solved: [], user: user[0].cfHandle }
+        );
+        session.send(`成功添加题目：${existing[0].name}`);
+      }
+
+      //获取题目信息
+      const apiUrl = `https://codeforces.com/api/problemset.problems`;
+      const res = await fetch(apiUrl);
+      const data = await res.json();
+      if (data.status !== 'OK') {
+        session.send('无法从 Codeforces 获取题目信息');
+        return;
+      }
+
+      const problem = data.result.problems.find(
+        (p: any) => p.contestId === contestId && p.index === index
+      );
+      if (!problem) {
+        session.send('未找到该题目，请检查题目编号是否正确');
+        return;
+      }
+      if (!problem.rating) {
+        session.send('该题目无难度评级，无法添加到题库');
+        return;
+      }
+
+      //确定难度等级
+      let difficulty: number;
+      if (problem.rating <= cfg.difficulty1) {
+        difficulty = 1; //简单
+      } else if (problem.rating <= cfg.difficulty2) {
+        difficulty = 2; //中等
+      } else {
+        difficulty = 3; //困难
+      }
+
+      //添加题目到数据库
+      await ctx.database.create('acm_problems', {
+        contestId: contestId,
+        index: index,
+        rating: problem.rating,
+        name: problem.name,
+        difficulty: difficulty,
+        used: false,
+        solved: [],
+        user: user[0].cfHandle,
+      });
+
+      session.send(`成功添加题目：${problem.name}`);
+    });
+
+  //绑定codeforces账号
+  ctx
+    .command('绑定cf <handle:string>', '绑定codeforces账号')
+    .action(async ({ session }, handle) => {
+      //console.log(handle);
+      if (!handle) {
+        session.send('请提供Codeforces用户名');
+        return;
+      }
+      const url = `https://codeforces.com/api/user.info?handles=${handle}`;
+      const res = await fetch(url);
+      const data = await res.json();
+      if (data.status !== 'OK') {
+        session.send('未找到该Codeforces账号，请检查用户名是否正确');
+        return;
+      }
+      const userId = session.userId;
+      const qexisting = await ctx.database.get('acm_users', { qId: userId });
+      const cexisting = await ctx.database.get('acm_users', { cfHandle: handle });
+      if (cexisting.length > 0) {
+        session.send(`该Codeforces账号已被绑定`);
+        return;
+      }
+      if (qexisting.length > 0) {
+        //更新已有记录
+        // await ctx.database.set('acm_users', { qId: userId }, { cfHandle: handle });
+        // session.send(`已成功更新Codeforces账号：${handle}`);
+        session.send(
+          '你已绑定过Codeforces账号，解绑后才能重新绑定。请注意解绑后积分数据将全部清除！'
+        );
+      } else {
+        //创建新记录
+        await ctx.database.create('acm_users', { qId: userId, cfHandle: handle, score: 0 });
+        session.send(`已成功绑定Codeforces账号：${handle}`);
+      }
+    });
+
+  //解绑cf账号
+  ctx
+    .command('解绑cf', '解绑codeforces账号')
+    .usage('解绑后积分数据全部清除，请慎重')
+    .action(async ({ session }) => {
+      const userId = session.userId;
+      const existing = await ctx.database.get('acm_users', { qId: userId });
+      if (existing.length === 0) {
+        session.send('你还未绑定Codeforces账号呢');
+        return;
+      }
+      await ctx.database.remove('acm_users', { qId: userId });
+      session.send('已成功解绑Codeforces账号');
+    });
+  //获取今天的题
+  ctx.command('tp', '(TodayProblems)获取今天的题目').action(async ({ session }) => {
+    const today = getDate();
+    const todayProblems = await ctx.database.get('acm_problems', {
+      used: true,
+      pushDate: today,
+    });
+    if (!todayProblems || todayProblems.length === 0) {
+      session.send('今天没有题目哦');
+      return;
+    }
+    let easyProblem, midProblem, hardProblem;
+    for (const problem of todayProblems) {
+      if (problem.difficulty === 1) {
+        easyProblem = problem;
+      } else if (problem.difficulty === 2) {
+        midProblem = problem;
+      } else if (problem.difficulty === 3) {
+        hardProblem = problem;
+      }
+    }
+    const message = formatProblemsMessage(easyProblem, midProblem, hardProblem, '今天的题目如下');
+    session.send(message);
+  });
 
   //做了今天的题加分, 检查时更新所有人的分数
   ctx
@@ -705,6 +793,7 @@ export function apply(ctx: Context) {
       //重新获取用户数据
       const updatedUsers = await ctx.database.get('acm_users', {});
       //按分数排序
+
       updatedUsers.sort((a: any, b: any) => b.score - a.score);
 
       // 计算分页
@@ -718,26 +807,33 @@ export function apply(ctx: Context) {
       }
 
       // 获取今天的三道题目及其solved数组
-      const today = getTodayDate();
+      const today = getDate();
       const todayProblems = await ctx.database.get('acm_problems', {
         used: true,
         pushDate: today,
       });
 
-      // 初始化三道题的solved数组
+      // 初始化三道题的solved数组和推题人
       let easyProblemSolved: string[] = [];
       let midProblemSolved: string[] = [];
       let hardProblemSolved: string[] = [];
+      let easyPusher: string = '';
+      let midPusher: string = '';
+      let hardPusher: string = '';
 
-      // 根据难度分配solved数组
+      // 根据难度分配solved数组和推题人
       for (const problem of todayProblems) {
         const solvedArray = Array.isArray(problem.solved) ? problem.solved : [];
+        const pusher = problem.user || '';
         if (problem.difficulty === 1) {
           easyProblemSolved = solvedArray;
+          easyPusher = pusher;
         } else if (problem.difficulty === 2) {
           midProblemSolved = solvedArray;
+          midPusher = pusher;
         } else if (problem.difficulty === 3) {
           hardProblemSolved = solvedArray;
+          hardPusher = pusher;
         }
       }
 
@@ -748,7 +844,11 @@ export function apply(ctx: Context) {
           easyProblemSolved,
           midProblemSolved,
           hardProblemSolved,
-          startIndex + 1 // 传递起始排名
+          easyPusher,
+          midPusher,
+          hardPusher,
+          startIndex + 1, // 传递起始排名
+          ctx
         );
         await session.send(`<img src="data:image/png;base64,${imageBuffer.toString('base64')}"/>`);
       } catch (error) {
@@ -764,8 +864,9 @@ export function apply(ctx: Context) {
       }
     });
 
-  //每天8:30推送题目
-  ctx.cron('30 8 * * *', async () => {
+  //每天推送题目
+  ctx.cron(getPushTime(cfg), async () => {
+    console.log(cfg.difficulty2);
     const groups = await ctx.database.get('acm_pushGroup', { push: true });
     if (groups.length === 0) {
       console.log('无群聊开启推送');
@@ -776,7 +877,7 @@ export function apply(ctx: Context) {
 
     try {
       //获取题目池
-      let { randomEasyProblems, randomMidProblems, randomHardProblems } = await getProblemList();
+      let { randomEasyProblems, randomMidProblems, randomHardProblems } = await getProblemList(cfg);
       const usedProblems = await ctx.database.get('acm_problems', { used: true });
 
       //过滤掉已使用的题目
